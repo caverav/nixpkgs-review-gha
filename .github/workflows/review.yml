@@ -282,11 +282,13 @@ jobs:
   report:
     runs-on: ubuntu-latest
     needs: [prepare, review]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     outputs:
       success: ${{ steps.report.outputs.success }}
 
     steps:
       - uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
           merge-multiple: true
 
@@ -294,6 +296,12 @@ jobs:
         id: report
         run: |
           systems=(x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin riscv64-linux)
+          requested=()
+          if [[ "${{ inputs.x86_64-linux }}" == "true" ]]; then requested+=(x86_64-linux); fi
+          if [[ "${{ inputs.aarch64-linux }}" == "true" ]]; then requested+=(aarch64-linux); fi
+          if [[ "${{ inputs.x86_64-darwin }}" != "no" ]]; then requested+=(x86_64-darwin); fi
+          if [[ "${{ inputs.aarch64-darwin }}" != "no" ]]; then requested+=(aarch64-darwin); fi
+          if [[ "${{ inputs.riscv64-linux }}" == "true" ]]; then requested+=(riscv64-linux); fi
 
           for system in "${systems[@]}"; do
             [[ -s "report_${system}.json" ]] || continue
@@ -325,8 +333,24 @@ jobs:
             cat "report_${system}.md" >> report.md
           done
 
+          missing=false
+          for system in "${requested[@]}"; do
+            if [[ ! -s "report_${system}.json" ]]; then
+              missing=true
+              echo -e "\n---\n### \`$system\`\n:warning: *Not run: the job did not produce a report (cancelled or failed before it started).*\n" >> report.md
+            fi
+          done
+
           cat report.md
-          echo success=$(jq -s 'all(.[].result[]; .failed==[])' report_*.json) >> "$GITHUB_OUTPUT"
+          if compgen -G 'report_*.json' > /dev/null; then
+            success=$(jq -s 'all(.[].result[]; .failed==[])' report_*.json)
+          else
+            success=true
+          fi
+          if [[ "$missing" == true ]]; then
+            success=false
+          fi
+          echo "success=$success" >> "$GITHUB_OUTPUT"
           sed '1s|$| for [#'"$PR_NUMBER"'](https://github.com/NixOS/nixpkgs/pull/'"$PR_NUMBER"')|' report.md >> $GITHUB_STEP_SUMMARY
         env:
           HEAD: ${{ needs.prepare.outputs.head }}
@@ -343,7 +367,7 @@ jobs:
   post-result:
     runs-on: ubuntu-latest
     needs: [prepare, report]
-    if: ${{ inputs.post-result || inputs.on-success != 'nothing' }}
+    if: ${{ !cancelled() && needs.report.result == 'success' && (inputs.post-result || inputs.on-success != 'nothing') }}
 
     steps:
       - uses: actions/download-artifact@v8
